@@ -11,7 +11,7 @@ var pdfu = require('pd-fileutils')
 // }
 
 // Input math expression
-var expression = 'a*x*x + b*x + c'
+var expression = process.argv[2];
 var tree = math.parse(expression);
 
 patch = new pdfu.Patch({nodes: [], connections: []})
