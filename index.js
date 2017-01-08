@@ -87,6 +87,15 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
     patch.connections.push({source: {id: newValue.id, port: 0}, sink: {id: parent, port: inlet}})
 
     // DEBUG
+    // console.log("Constant connected to a", (inlet === 0 ? "hot inlet" : "cold inlet"), ", using", (inlet === 0 ? "a [receive]." : "a [loadbang]."));
+
+    // [loaadbang] for cold inlet
+    if (inlet === 1) {
+      var loadbang = { proto: "loadbang", layout: { x: newX, y: newY-20 }, args: [] }
+      patch.addNode(loadbang)
+      patch.connections.push({source: {id: loadbang.id, port: 0}, sink: {id: newValue.id, port: 0}})
+    }
+    // DEBUG
     // console.log(String(newValue.id), "-- Adding value", tree.value, "to connect to", parent, "on", inlet, "depth is", depth);
   }
   // Case for operators and functions, "args" are the operands and might be branches, symbols or constants. Walk() into it recur(recur(recur(recur(sively))))!
