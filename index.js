@@ -1,4 +1,8 @@
 // Copyright (c) 2016 Simon Larcher All Rights Reserved.
+// Usage:
+// Enable logging:
+// $ WARN=true node index.js "..."
+// otherwise $ node index.js "..."
 
 var math = require('mathjs');
 var _ = require('underscore')._;
@@ -10,6 +14,13 @@ var pdfu = require('pd-fileutils')
 //   console.log(require('util').inspect(a, { depth: null }));
 // }
 
+// Console logging function using environment variable
+function WARN() {
+  if (process.env.WARN === "true") {
+    console.warn.apply(this, arguments)
+  }
+}
+
 // Input math expression
 var expression = process.argv[2];
 var tree = math.parse(expression);
@@ -18,6 +29,7 @@ patch = new pdfu.Patch({nodes: [], connections: []})
 
 var operators = {}
 var variables = []
+var constants = 0
 
 var depth = 0
 
@@ -49,7 +61,7 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
     patch.connections.push({source: {id: newObj.id, port: 0}, sink: {id: parent, port: inlet}})
 
     // DEBUG
-    // console.log(String(newObj.id), "-- Adding", tree.fn, "to connect to", parent, "on", inlet, "depth is", depth);
+    WARN(String(newObj.id), "-- Adding", tree.fn, "to connect to", parent, "on", inlet, "depth is", depth);
 
     // Store the id of this operator which is the beginning of a new branch
     parent = newObj.id
@@ -68,14 +80,12 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
     patch.connections.push({source: {id: newSymbol.id, port: 0}, sink: {id: parent, port: inlet}})
 
     // DEBUG
-    // console.log(String(newSymbol.id), "-- Adding symbol", tree.name, "to connect to", parent, "on", inlet, "depth is", depth);
+    WARN(String(newSymbol.id), "-- Adding symbol", tree.name, "to connect to", parent, "on", inlet, "depth is", depth);
 
     // Keep an ordered list of variables, it represents the precedence order in the expression
     variables.push(tree.name)
   }
   // Case of a constant value, means adding a [f ] object such as [10] or [42].
-  // TODO: The whole patch is broken if the constant is on a hot inlet, needs to be banged as well to recalculate.
-  // If on cold inlet, needs a [loadbang].
   if (tree.hasOwnProperty('value')) {
     // Auto-position
     newX = parentX + (inlet ? (20) : -20)
@@ -87,7 +97,7 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
     patch.connections.push({source: {id: newValue.id, port: 0}, sink: {id: parent, port: inlet}})
 
     // DEBUG
-    // console.log("Constant connected to a", (inlet === 0 ? "hot inlet" : "cold inlet"), ", using", (inlet === 0 ? "a [receive]." : "a [loadbang]."));
+    WARN("Constant connected to a", (inlet === 0 ? "hot inlet" : "cold inlet") + ", using", (inlet === 0 ? "a [receive]." : "a [loadbang]."));
 
     // [loaadbang] for cold inlet
     if (inlet === 1) {
@@ -95,8 +105,18 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
       patch.addNode(loadbang)
       patch.connections.push({source: {id: loadbang.id, port: 0}, sink: {id: newValue.id, port: 0}})
     }
+    // [receive] for hot inlet
+    if (inlet === 0) {
+      var receive = { proto: "r", layout: { x: newX, y: newY-20 }, args: ["\\$0-const-"+constants] }
+      // Add to the ordered list of variables
+      variables.push("const-"+constants)
+      constants++
+
+      patch.addNode(receive)
+      patch.connections.push({source: {id: receive.id, port: 0}, sink: {id: newValue.id, port: 0}})
+    }
     // DEBUG
-    // console.log(String(newValue.id), "-- Adding value", tree.value, "to connect to", parent, "on", inlet, "depth is", depth);
+    WARN(String(newValue.id), "-- Adding value", tree.value, "to connect to", parent, "on", inlet, "(added a", (inlet ? "[loadbang])," : "[receive]),"), "depth is", depth);
   }
   // Case for operators and functions, "args" are the operands and might be branches, symbols or constants. Walk() into it recur(recur(recur(recur(sively))))!
   if (tree.hasOwnProperty('args')) {
@@ -115,59 +135,68 @@ function walk (tree, parent, inlet, depth, parentX, parentY) {
   }
 }
 
-// First, create the [outlet] objet
-var outlet = { proto: 'outlet', layout: {x: 250, y: 480}, args: []}
-patch.addNode(outlet)
+// First, create the [outlet] object
+var out_f = { proto: 'f', layout: {x: 250, y: 480}, args: []}
+patch.addNode(out_f)
+patch.addNode({ proto: 'outlet', layout: {x: 250, y: 520}, args: []})
+patch.connections.push({source: {id: out_f.id, port: 0}, sink: {id: patch.nodes.length-1, port: 0}})
+patch.addNode({ proto: 'r', layout: {x: 230, y: 460}, args: ["\\$0-trig"]})
+patch.connections.push({source: {id: patch.nodes.length - 1, port: 0}, sink: {id: out_f.id, port: 0}})
+
 
 // Walk the expression tree recursively and build the patch on our way
-walk(tree, outlet.id, 0, depth, parentX, parentY)
+walk(tree, out_f.id, 1, depth, parentX, parentY)
 
 // variables will hold the order of execution for the expression
-var trigger = ""
+var trigger = "b "
 // HACK: only way I found to repeat N times a pattern and put it in a string, feels ugly!
 for (var i = 0; i < variables.length; i++) {
   trigger += "b "
 }
 
-// Objects for inlets and recalculating
-
-patch.addNode({ proto: 'r', layout: {x: 20, y: 50}, args: ['\\$0-recalculate']})
-patch.addNode({ proto: "t", layout: {x: 20, y: 80}, args: [trigger]})
-// Store the id of the [trigger] object, used for the inlets mechanism
-var trigger_id = patch.nodes.length - 1
-patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: trigger_id, port: 0}})
-
-var inlet_offset = 160;
+var inlet_offset = 20
 
 // DEBUG
-// console.log(variables);
+// WARN(variables);
 
-// Get unique symbols
-_.uniq(variables).forEach(function (v, i, a) {
+// Get unique symbols and remove constants.
+inlets = _.uniq(variables).filter(function (e) {
+  return !e.startsWith("const-")
+})
 
-  // Get indices of other occurences of the symbol in the precedence order (stored in "variables")
-  var indices = variables.reduce(function(a, e, i) {
-    if (e === v)
-        a.push(i);
-    return a;
-  }, [])
+// Iterate on kept values, x, y, z etc...
+inlets.forEach(function (v, i, a) {
 
+  var s_offset = 80
   patch.addNode({ proto: 'inlet', layout: {x: inlet_offset, y: 30}, args: []})
-  patch.addNode({ proto: 't', layout: {x: inlet_offset, y: 60}, args: ["b f"]})
-  patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
-  patch.addNode({ proto: 's', layout: {x: inlet_offset, y: 90}, args: ["\\$0-recalculate"]})
-  patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
+  // Case of first inlet, also add the triggering for the whole formula
+  if (i === 0) {
+    patch.addNode({ proto: 't', layout: {x: inlet_offset  , y: 60}, args: ["b f"]})
+    patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
+    patch.addNode({ proto: 's', layout: {x: inlet_offset + 32 , y: 90}, args: ["\\$0-"+v]})
+    patch.connections.push({source: {id: patch.nodes.length - 2, port: 1}, sink: {id: patch.nodes.length - 1, port: 0}})
+    patch.addNode({ proto: "t", layout: {x: 20, y: 110}, args: [trigger]})
+    patch.connections.push({source: {id: patch.nodes.length - 3, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
+    // Store the id of the [trigger] object, used for the inlets mechanism
+    var trigger_id = patch.nodes.length - 1
 
-  patch.addNode({ proto: 'f', layout: {x: inlet_offset, y: 160}, args: []})
-  // For each of the occurences, connect the corresponding [trigger] outlet
-  indices.forEach(function (v) {
-    patch.connections.push({source: {id: trigger_id, port: v}, sink: {id: patch.nodes.length - 1, port: 0}})
-  })
+    patch.addNode({ proto: "s", layout: {x: 20, y: 150}, args: ["\\$0-trig"]})
+    patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
 
-  patch.connections.push({source: {id: patch.nodes.length - 3, port: 1}, sink: {id: patch.nodes.length - 1, port: 1}})
-  patch.addNode({ proto: 's', layout: {x: inlet_offset, y: 190}, args: ["\\$0-"+v]})
-  patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
-  inlet_offset += 140
+    // For each variable, connect to the [trigger] in the righ order
+    variables.forEach(function (v, i, a) {
+      patch.addNode({ proto: 's', layout: {x: 20 + s_offset, y: 150}, args: ["\\$0-"+v]})
+      patch.connections.push({source: {id: trigger_id, port: i + 1}, sink: {id: patch.nodes.length - 1, port: 0}})
+      s_offset += 48 + (v.length * 8)
+    })
+    inlet_offset += 48 + (v.length * 8)
+  }
+  else {
+    // Other inlets/value just need a [send]
+    patch.addNode({ proto: 's', layout: {x: inlet_offset, y: 60}, args: ["\\$0-"+v]})
+    patch.connections.push({source: {id: patch.nodes.length - 2, port: 0}, sink: {id: patch.nodes.length - 1, port: 0}})
+    inlet_offset += 48 + (v.length * 8)
+  }
 })
 
 // DEBUG
@@ -178,6 +207,6 @@ var patchStr = pdfu.renderPd(patch)
 patchStr += "#X text 10 10 " + expression + ";\n"
 
 // Write it to a file
-// fs.writeFileSync('/tmp/pdeval.pd', patchStr)
+fs.writeFileSync('/tmp/pdeval.pd', patchStr)
 // Or output it to the console
-console.log(patchStr);
+// console.log(patchStr);
